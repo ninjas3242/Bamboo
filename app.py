@@ -9,22 +9,21 @@ from docx import Document
 from pinecone import Pinecone, ServerlessSpec
 from uuid import uuid4
 from io import BytesIO
-import ollama  # <-- Local embedding model
 from openai import OpenAI
 
 # Load environment variables
 load_dotenv()
 
 # Pinecone setup
-PINECONE_API_KEY =  st.secrets["PINECONE_API_KEY"]
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 pc = Pinecone(api_key=PINECONE_API_KEY)
 
-# OpenAI API Key
-CLIENT_KEY =  st.secrets["CLIENT_KEY"]
-openai_client = OpenAI(api_key=CLIENT_KEY)
+# OpenAI setup
+OPENAI_API_KEY = os.getenv("CLIENT_KEY")
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-INDEX_NAME = "bamboo"
-DIMENSION = 384  # Using 384-dim embeddings
+INDEX_NAME = "bamb"
+DIMENSION = 1536  # OpenAI 'text-embedding-3-small' returns 1536-dim vectors
 REGION = "us-east-1"
 
 # Create index if not already created
@@ -36,183 +35,144 @@ if INDEX_NAME not in pc.list_indexes().names():
         spec=ServerlessSpec(cloud="aws", region=REGION)
     )
 
-# Access the index
 index = pc.Index(INDEX_NAME)
 
-# Document chunking settings
 CHUNK_SIZE = 2000
 CHUNK_OVERLAP = 500
-
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 
-# PDF Reader
+# Readers
 def read_pdf(file):
     file.seek(0)
     pdf_reader = PdfReader(BytesIO(file.read()))
-    text = []
-    for page in pdf_reader.pages:
-        page_text = page.extract_text()
-        if page_text:
-            text.append(page_text)
-    return "\n".join(text) if text else "Could not extract text from PDF."
+    return "\n".join([p.extract_text() for p in pdf_reader.pages if p.extract_text()])
 
-# DOCX Reader
 def read_docx(file):
     file.seek(0)
     doc = Document(BytesIO(file.read()))
-    return "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+    return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
 
-# Chunk text
+# Chunking
 def chunk_document(text):
-    text_splitter = RecursiveCharacterTextSplitter(
+    splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
         length_function=len,
         separators=["\n\n", "\n", " ", ""]
     )
-    return text_splitter.split_text(text)
+    return splitter.split_text(text)
 
-# Generate embeddings using Ollama (local, free)
+# Generate OpenAI embeddings
 def generate_embeddings(text_chunks):
     embeddings = []
     for i, chunk in enumerate(text_chunks):
         try:
-            # Get the response from Ollama
-            response = ollama.embed(model="mxbai-embed-large", input=chunk)
-
-            # Check if 'embeddings' is in the response and is a list
-            if 'embeddings' in response and isinstance(response['embeddings'], list):
-                # Check if there are embeddings in the list
-                if len(response['embeddings']) > 0:
-                    embedding = response['embeddings'][0]  # Access the first embedding
-                    embeddings.append(embedding)
-                else:
-                    raise ValueError(f"Empty embeddings list for chunk {i}")
-            else:
-                raise ValueError(f"Embeddings not found in response for chunk {i}: {response}")
-
+            response = openai_client.embeddings.create(
+                model="text-embedding-3-small", input=chunk
+            )
+            embedding = response.data[0].embedding
+            embeddings.append(embedding)
         except Exception as e:
-            logging.error(f"[ERROR] Failed to generate embedding for chunk {i}: {e}")
-            st.error(f"Embedding generation failed for chunk {i}. See terminal for details.")
-    
+            logging.error(f"[ERROR] Embedding failed on chunk {i}: {e}")
+            st.error(f"Embedding failed for chunk {i}.")
     return embeddings
 
-# Store chunks + embeddings in Pinecone
+# Store to Pinecone
 def store_in_pinecone(chunks, embeddings):
+    print(f"Chunks count: {len(chunks)}, Embeddings count: {len(embeddings)}")
     vectors = []
-    for chunk, embedding in zip(chunks, embeddings):
-        vector_id = str(uuid4())
-        vectors.append({
-            "id": vector_id,
-            "values": embedding,
-            "metadata": {"text": chunk}
-        })
+    for chunk, emb in zip(chunks, embeddings):
+        if not isinstance(emb, list):
+            emb = emb.tolist()  # convert if numpy array
+        if len(emb) != DIMENSION:
+            print(f"Skipping embedding with wrong dimension: {len(emb)}")
+            continue
+        vectors.append({"id": str(uuid4()), "values": emb, "metadata": {"text": chunk}})
+
+    print(f"Upserting {len(vectors)} vectors")
+    if vectors:
+        print(f"Dimension of first vector: {len(vectors[0]['values'])}")
+    else:
+        print("No vectors to upsert!")
     index.upsert(vectors)
 
-# Search Pinecone
+
+# Retrieve from Pinecone
 def retrieve_relevant_documents(query, top_k=5):
     try:
-        response = ollama.embed(
-            model="mxbai-embed-large",
-            input=query
-        )
+        query_emb = openai_client.embeddings.create(
+            model="text-embedding-3-small", input=query
+        ).data[0].embedding
 
-        # Check if 'embedding' is in the response
-        if 'embeddings' in response:
-            query_embedding = response['embeddings']
-        else:
-            # Print the full response for debugging
-            logging.error(f"Embedding not found in response: {response}")
-            st.error("Error: Embedding not found in response. See terminal for details.")
-            return []
-
-        results = index.query(vector=query_embedding, top_k=top_k, include_metadata=True)
+        results = index.query(vector=query_emb, top_k=top_k, include_metadata=True)
         return [match["metadata"]["text"] for match in results["matches"]]
     except Exception as e:
-        logging.error(f"[ERROR] Failed to retrieve relevant documents: {e}")
-        st.error("Error during document retrieval. See terminal for details.")
+        logging.error(f"[ERROR] Retrieval failed: {e}")
+        st.error("Document retrieval failed.")
         return []
 
-# Function to generate an answer using retrieved document context
+# Answer generator using context
 def generate_answer(query):
-    retrieved_docs = retrieve_relevant_documents(query, top_k=5)
+    docs = retrieve_relevant_documents(query, top_k=5)
     
-    if retrieved_docs and any(retrieved_docs):
-        context = "\n\n".join(retrieved_docs[:5])
-        prompt = f"""Use the provided document context to answer the query.
+    if docs:
+        context = "\n\n".join(docs)
+        prompt = f"""Use the following context to answer the query.
         
-        ### Document Context:
+        ### Context:
         {context}
         
         ### Query:
         {query}
         
-        ### Answer:
-        """
+        ### Answer:"""
     else:
-        prompt = f"""You are an expert AI assistant. Answer the following query using your general knowledge:
+        prompt = f"""You are an intelligent AI assistant. Answer this:
         
         ### Query:
         {query}
         
-        ### Answer:
-        """
-    
+        ### Answer:"""
+
     try:
         response = openai_client.chat.completions.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "You are an AI assistant that answers queries based on document context. If no documents are available, use general knowledge."},
+                {"role": "system", "content": "You answer questions using provided document context. If no context, use your own knowledge."},
                 {"role": "user", "content": prompt}
             ]
         )
-        
         return response.choices[0].message.content
     except Exception as e:
-        logging.error(f"[ERROR] Failed to generate answer: {e}")
-        st.error("Error during answer generation. See terminal for details.")
-        return "I'm sorry, I couldn't generate an answer at this time. Please try again later."
+        logging.error(f"[ERROR] GPT failed: {e}")
+        st.error("Failed to generate answer.")
+        return "Sorry, something went wrong."
 
 # Streamlit UI
 st.set_page_config(page_title="Document QA", page_icon="📄", layout="wide")
 st.title(":bamboo: Bamboo Species Chatbot")
-user_choice = st.radio("Choose your action:", ("Upload New Files", "Ask a Question"))
+action = st.radio("Choose your action:", ("Upload New Files", "Ask a Question"))
 
-if user_choice == "Upload New Files":
-    uploaded_files = st.file_uploader("Upload PDFs or DOCX files", accept_multiple_files=True, type=["pdf", "docx"])
-    
-    if uploaded_files:
-        for uploaded_file in uploaded_files:
-            with st.spinner(f"Processing {uploaded_file.name}..."):
-                if uploaded_file.name.endswith(".pdf"):
-                    text = read_pdf(uploaded_file)
-                elif uploaded_file.name.endswith(".docx"):
-                    text = read_docx(uploaded_file)
-                else:
-                    st.error(f"Unsupported file type: {uploaded_file.name}")
-                    continue
-
-                st.info("Chunking document and generating embeddings...")
+if action == "Upload New Files":
+    files = st.file_uploader("Upload PDF or DOCX files", type=["pdf", "docx"], accept_multiple_files=True)
+    if files:
+        for f in files:
+            with st.spinner(f"Processing {f.name}..."):
+                text = read_pdf(f) if f.name.endswith(".pdf") else read_docx(f)
                 chunks = chunk_document(text)
-                embeddings = generate_embeddings(chunks)
+                st.info("Generating embeddings...")
+                embs = generate_embeddings(chunks)
+                st.info("Storing to Pinecone...")
+                store_in_pinecone(chunks, embs)
+                st.success(f"{f.name} indexed to Pinecone!")
 
-                st.info(f"Storing {len(chunks)} chunks to Pinecone...")
-                store_in_pinecone(chunks, embeddings)
-
-                st.success(f"Indexed {uploaded_file.name} to Pinecone!")
-
-elif user_choice == "Ask a Question":
-    query = st.text_input("Ask a question about the documents:", placeholder="Enter your query here...")
-
+elif action == "Ask a Question":
+    query = st.text_input("Ask something about your documents:", placeholder="Type here...")
     if st.button("Generate Answer"):
         if query.strip():
-            with st.spinner("Generating answer..."):
-          
-                
-                # Then, generate and display the answer
+            with st.spinner("Thinking..."):
                 answer = generate_answer(query)
                 st.markdown("### 🤖 Answer:")
                 st.write(answer)
         else:
-            st.warning("Please enter a query before clicking the button.")
+            st.warning("Please enter a question.")
