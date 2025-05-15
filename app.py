@@ -16,11 +16,11 @@ from openai import OpenAI
 load_dotenv()
 
 # Pinecone setup
-PINECONE_API_KEY =  st.secrets("PINECONE_API_KEY")
+PINECONE_API_KEY =  st.secrets["PINECONE_API_KEY"]
 pc = Pinecone(api_key=PINECONE_API_KEY)
 
 # OpenAI API Key
-CLIENT_KEY =  st.secrets("CLIENT_KEY")
+CLIENT_KEY =  st.secrets["CLIENT_KEY"]
 openai_client = OpenAI(api_key=CLIENT_KEY)
 
 INDEX_NAME = "bamboo"
