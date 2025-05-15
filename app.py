@@ -13,6 +13,7 @@ from openai import OpenAI
 
 # Load environment variables
 load_dotenv()
+openai.api_key = st.secrets["CLIENT_KEY"]
 
 # Pinecone setup
 PINECONE_API_KEY = st.secrets["PINECONE_API_KEY"]
@@ -100,16 +101,23 @@ def store_in_pinecone(chunks, embeddings):
 # Retrieve from Pinecone
 def retrieve_relevant_documents(query, top_k=5):
     try:
-        query_emb = openai_client.embeddings.create(
-            model="text-embedding-3-small", input=query
-        ).data[0].embedding
+        # Generate embeddings for the query using OpenAI API
+        response = openai.Embedding.create(
+            model="text-embedding-3-small",
+            input=query
+        )
+        query_emb = response['data'][0]['embedding']
 
+        # Query Pinecone index with the embedding
         results = index.query(vector=query_emb, top_k=top_k, include_metadata=True)
+        
         return [match["metadata"]["text"] for match in results["matches"]]
+    
     except Exception as e:
         logging.error(f"[ERROR] Retrieval failed: {e}")
         st.error("Document retrieval failed.")
         return []
+
 
 # Answer generator using context
 def generate_answer(query):
