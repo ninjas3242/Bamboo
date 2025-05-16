@@ -10,16 +10,33 @@ from pinecone import Pinecone, ServerlessSpec
 from uuid import uuid4
 from io import BytesIO
 from openai import OpenAI
+import pyrebase
 
 # Load environment variables
 load_dotenv()
 
+# Firebase configuration
+firebase_config = {
+    "apiKey": "AIzaSyDdMC9baSTkWWBwnVCu-Xs2jZj86-fLmsE",
+    "authDomain": "bamboo-project-d9832.firebaseapp.com",
+    "databaseURL": "https://bamboo-project-d9832-default-rtdb.firebaseio.com",
+    "projectId": "bamboo-project-d9832",
+    "storageBucket": "bamboo-project-d9832.appspot.com",
+    "messagingSenderId": "525252188687",
+    "appId": "1:525252188687:web:366f42a40f6fe05678a17a",
+    "measurementId": "G-1J9PH26HN0"
+}
+
+# Initialize Firebase
+firebase = pyrebase.initialize_app(firebase_config)
+auth = firebase.auth()
+
 # Pinecone setup
-PINECONE_API_KEY = st.secrets["PINECONE_API_KEY"]
+PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
 pc = Pinecone(api_key=PINECONE_API_KEY)
 
 # OpenAI setup
-OPENAI_API_KEY = st.secrets["CLIENT_KEY"]
+OPENAI_API_KEY = os.environ.get("CLIENT_KEY")
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 INDEX_NAME = "bamb"
@@ -40,6 +57,69 @@ index = pc.Index(INDEX_NAME)
 CHUNK_SIZE = 2000
 CHUNK_OVERLAP = 500
 logging.basicConfig(level=logging.INFO)
+
+# Authentication functions
+def handle_login(email, password):
+    """Handle user login with Firebase."""
+    try:
+        user = auth.sign_in_with_email_and_password(email, password)
+        st.session_state.user = user
+        st.session_state.user_email = email
+        st.success("Login successful!")
+        st.rerun()
+        return True
+    except Exception as e:
+        error_message = str(e)
+        if "INVALID_EMAIL" in error_message:
+            st.error("Invalid email address.")
+        elif "INVALID_PASSWORD" in error_message:
+            st.error("Incorrect password.")
+        else:
+            st.error(f"Login failed: {error_message}")
+        return False
+
+def handle_password_reset(email):
+    """Send password reset email."""
+    try:
+        auth.send_password_reset_email(email)
+        st.success(f"Password reset email sent to {email}")
+    except Exception as e:
+        error_message = str(e)
+        if "INVALID_EMAIL" in error_message:
+            st.error("This email is not registered.")
+        else:
+            st.error(f"Password reset failed: {error_message}")
+
+def handle_logout():
+    """Clear session state on logout."""
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.success("You have been logged out successfully.")
+
+def show_auth_page():
+    """Display authentication options (login/forgot password)."""
+    st.title(":bamboo: Bamboo Species Chatbot Login")
+    st.caption("Access your account securely.")
+        
+    auth_option = st.radio("Choose an option:", 
+                          ["Login", "Forgot Password"])
+    
+    if auth_option == "Login":
+        with st.form("login_form"):
+            email = st.text_input("Email", key="login_email")
+            password = st.text_input("Password", type="password", key="login_password")
+            submit = st.form_submit_button("Login")
+            
+            if submit:
+                handle_login(email, password)
+    
+    elif auth_option == "Forgot Password":
+        with st.form("reset_form"):
+            email = st.text_input("Email", key="reset_email")
+            submit = st.form_submit_button("Send Reset Link")
+            
+            if submit:
+                handle_password_reset(email)
 
 # Readers
 def read_pdf(file):
@@ -148,31 +228,75 @@ def generate_answer(query):
         st.error("Failed to generate answer.")
         return "Sorry, something went wrong."
 
-# Streamlit UI
-st.set_page_config(page_title="Document QA", page_icon="📄", layout="wide")
-st.title(":bamboo: Bamboo Species Chatbot")
-action = st.radio("Choose your action:", ("Upload New Files", "Ask a Question"))
+# Main app functionality
+def show_main_app():
+    st.title(":bamboo: Bamboo Species Chatbot")
+    action = st.radio("Choose your action:", ("Upload New Files", "Ask a Question"))
 
-if action == "Upload New Files":
-    files = st.file_uploader("Upload PDF or DOCX files", type=["pdf", "docx"], accept_multiple_files=True)
-    if files:
-        for f in files:
-            with st.spinner(f"Processing {f.name}..."):
-                text = read_pdf(f) if f.name.endswith(".pdf") else read_docx(f)
-                chunks = chunk_document(text)
-                st.info("Generating embeddings...")
-                embs = generate_embeddings(chunks)
-                st.info("Storing to Pinecone...")
-                store_in_pinecone(chunks, embs)
-                st.success(f"{f.name} indexed to Pinecone!")
+    if action == "Upload New Files":
+        files = st.file_uploader("Upload PDF or DOCX files", type=["pdf", "docx"], accept_multiple_files=True)
+        if files:
+            for f in files:
+                with st.spinner(f"Processing {f.name}..."):
+                    text = read_pdf(f) if f.name.endswith(".pdf") else read_docx(f)
+                    chunks = chunk_document(text)
+                    st.info("Generating embeddings...")
+                    embs = generate_embeddings(chunks)
+                    st.info("Storing to Pinecone...")
+                    store_in_pinecone(chunks, embs)
+                    st.success(f"{f.name} indexed to Pinecone!")
 
-elif action == "Ask a Question":
-    query = st.text_input("Ask something about your documents:", placeholder="Type here...")
-    if st.button("Generate Answer"):
-        if query.strip():
-            with st.spinner("Thinking..."):
-                answer = generate_answer(query)
-                st.markdown("### 🤖 Answer:")
-                st.write(answer)
-        else:
-            st.warning("Please enter a question.")
+    elif action == "Ask a Question":
+        query = st.text_input("Ask something about your documents:", placeholder="Type here...")
+        if st.button("Generate Answer"):
+            if query.strip():
+                with st.spinner("Thinking..."):
+                    answer = generate_answer(query)
+                    st.markdown("### 🤖 Answer:")
+                    st.write(answer)
+            else:
+                st.warning("Please enter a question.")
+
+# Streamlit app
+def main():
+    st.set_page_config(page_title="Document QA", page_icon="📄", layout="wide")
+    
+    # Custom CSS for better styling
+    st.markdown("""
+    <style>
+        .stTextInput input, .stTextArea textarea {
+            border-radius: 8px !important;
+        }
+        .stButton button {
+            border-radius: 8px !important;
+            background-color: #4CAF50 !important;
+            color: white !important;
+        }
+        .stAlert {
+            border-radius: 8px !important;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Initialize session state for authentication
+    if "user" not in st.session_state:
+        st.session_state.user = None
+    if "user_email" not in st.session_state:
+        st.session_state.user_email = None
+    
+    # Show appropriate page based on authentication state
+    if st.session_state.user:
+        # User is logged in - show sidebar with logout button
+        st.sidebar.title(f"Welcome, {st.session_state.user_email}")
+        if st.sidebar.button("Logout"):
+            handle_logout()
+            st.rerun()
+        
+        # Show the main application
+        show_main_app()
+    else:
+        # User is not logged in - show authentication page
+        show_auth_page()
+
+if __name__ == "__main__":
+    main()
