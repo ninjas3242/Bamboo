@@ -97,30 +97,17 @@ def handle_logout():
     st.success("You have been logged out successfully.")
 
 def show_auth_page():
-    """Display authentication options (login/forgot password)."""
+    """Display login form only."""
     st.title(":bamboo: Bamboo Species Chatbot Login")
     st.caption("Access your account securely.")
-        
-    auth_option = st.radio("Choose an option:", 
-                          ["Login", "Forgot Password"])
-    
-    if auth_option == "Login":
-        with st.form("login_form"):
-            email = st.text_input("Email", key="login_email")
-            password = st.text_input("Password", type="password", key="login_password")
-            submit = st.form_submit_button("Login")
-            
-            if submit:
-                handle_login(email, password)
-    
-    elif auth_option == "Forgot Password":
-        with st.form("reset_form"):
-            email = st.text_input("Email", key="reset_email")
-            submit = st.form_submit_button("Send Reset Link")
-            
-            if submit:
-                handle_password_reset(email)
 
+    with st.form("login_form"):
+        email = st.text_input("Email", key="login_email")
+        password = st.text_input("Password", type="password", key="login_password")
+        submit = st.form_submit_button("Login")
+
+        if submit:
+            handle_login(email, password)
 # Readers
 def read_pdf(file):
     file.seek(0)
